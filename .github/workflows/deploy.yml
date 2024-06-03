@@ -1,0 +1,80 @@
+# 워크플로우 이름
+name: CI-CD
+
+# main 브랜치에 push 하면 실행
+on:
+  push:
+    branches:
+      - main
+
+# 사용할 이름
+env:
+  S3_BUCKET_NAME: mytestbucket0603 # S3 버킷 이름
+  RESOURCE_PATH: ./src/main/resources/application.yaml # Spring Boot 설정 파일 경로
+  CODE_DEPLOY_APPLICATION_NAME: TEST-CODEDEPLOY # CodeDeploy 애플리케이션 이름
+  CODE_DEPLOY_DEPLOYMENT_GROUP_NAME: code-deploy-group # CodeDeploy 배포 그룹 이름
+
+# 실행할 job 목록
+jobs:
+  build:
+    runs-on: ubuntu-latest # 실행 환경: Ubuntu 최신 버전
+	
+    steps:
+    	# CI 서버로 코드 내려받기
+      - name: Checkout
+        uses: actions/checkout@v2
+
+		# Java 17 환경 세팅
+      - name: Set up JDK 17
+        uses: actions/setup-java@v1
+        with:
+          java-version: 17
+        
+        # application.yml에 환경 변수 주입
+      - name: Set yaml file 
+        uses: microsoft/variable-substitution@v1
+        with:
+          files: ${{ env.RESOURCE_PATH }} 
+        env:
+          spring.datasource.url: ${{ secrets.DB_URL }} 
+          spring.datasource.username: ${{ secrets.DB_USERNAME }} 
+          spring.datasource.password: ${{ secrets.DB_PASSWORD }}
+          kakao.serviceapp.key: ${{ secrets.KAKAO_SERVICEAPP_KEY }}
+          jwt.secretKey.access: ${{ secrets.ACCESS_TOKEN_SECRETKEY }}
+          jwt.secretKey.refresh: ${{ secrets.REFRESH_TOKEN_SECRETKEY }}
+        
+        # gradlew에 실행 권한 부여
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+        shell: bash
+
+        # Gradle 빌드 (test 제외)
+      - name: Build with Gradle
+        run: ./gradlew build -x test
+        shell: bash
+
+        # 프로젝트 zip으로 압축 (파일명은 커밋 SHA)
+      - name: Make zip file
+        run: zip -r ./$GITHUB_SHA.zip .
+        shell: bash
+
+        # AWS 자격 증명
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }} # IAM User 엑세스 키
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }} # IAM User 시크릿 엑세스 키
+          aws-region: ${{ secrets.AWS_REGION }} # 리전 이름
+
+        # 압축한 zip S3 버킷으로 업로드
+      - name: Upload to S3
+        run: aws s3 cp --region ap-northeast-2 ./$GITHUB_SHA.zip s3://$S3_BUCKET_NAME/$GITHUB_SHA.zip
+
+        # CodeDeploy로 S3 버킷에 업로드한 zip 파일 EC2로 배포
+      - name: Code Deploy
+        run: | 
+          aws deploy create-deployment \
+          --deployment-config-name CodeDeployDefault.AllAtOnce \
+          --application-name ${{ env.CODE_DEPLOY_APPLICATION_NAME }} \
+          --deployment-group-name ${{ env.CODE_DEPLOY_DEPLOYMENT_GROUP_NAME }} \
+          --s3-location bucket=$S3_BUCKET_NAME,bundleType=zip,key=$GITHUB_SHA.zip
